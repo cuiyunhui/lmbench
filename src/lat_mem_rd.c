@@ -1,7 +1,9 @@
 /*
  * lat_mem_rd.c - measure memory load latency
  *
- * usage: lat_mem_rd [-P <parallelism>] [-W <warmup>] [-N <repetitions>] [-t] size-in-MB [stride ...]
+ * usage: lat_mem_rd [-P <parallelism>] [-W <warmup>] [-N <repetitions>]
+ *                   [-s <start>] [-e <end>] [-t [-p <chase-page-size>]]
+ *                   size-in-MB [stride ...]
  *
  * Copyright (c) 1994 Larry McVoy.  
  * Copyright (c) 2003, 2004 Carl Staelin.
@@ -18,11 +20,35 @@ char	*id = "$Id: s.lat_mem_rd.c 1.13 98/06/30 16:13:49-07:00 lm@lm.bitmover.com 
 #define STRIDE  (512/sizeof(char *))
 #define	LOWER	512
 void	loads(size_t len, size_t range, size_t stride, 
-	      int parallel, int warmup, int repetitions);
+	      int parallel, int warmup, int repetitions,
+	      size_t chase_pagesize);
 size_t	step(size_t k);
 void	initialize(iter_t iterations, void* cookie);
 
 benchmp_f	fpInit = stride_initialize;
+
+static int
+check_chase_pagesize(size_t chase_pagesize, size_t stride)
+{
+	if (chase_pagesize < stride) {
+		fprintf(stderr,
+			"Invalid chase page size %lu: must be >= stride "
+			"(%lu)\n",
+			(unsigned long)chase_pagesize,
+			(unsigned long)stride);
+		return (-1);
+	}
+	if ((chase_pagesize % sizeof(char *)) != 0) {
+		fprintf(stderr,
+			"Invalid chase page size %lu: must be a multiple "
+			"of %lu\n",
+			(unsigned long)chase_pagesize,
+			(unsigned long)sizeof(char *));
+		return (-1);
+	}
+
+	return (0);
+}
 
 int
 main(int ac, char **av)
@@ -32,17 +58,24 @@ main(int ac, char **av)
 	int	parallel = 1;
 	int	warmup = 0;
 	int	repetitions = TRIES;
-        size_t	len;
+	size_t	chase_pagesize = 0;
+	size_t	len;
 	size_t	range;
 	size_t	stride;
 	size_t	lower = LOWER;
 	size_t	end = 0;
-	char   *usage = "[-P <parallelism>] [-W <warmup>] [-N <repetitions>] [-s <start>] [-e <end>] [-t] len [stride...]\n";
+	char   *usage = "[-P <parallelism>] [-W <warmup>] [-N <repetitions>] [-s <start>] [-e <end>] [-t [-p <chase-page-size>]] len [stride...]\n";
 
-	while (( c = getopt(ac, av, "tP:W:N:s:e:")) != EOF) {
+	while (( c = getopt(ac, av, "tp:P:W:N:s:e:")) != EOF) {
 		switch(c) {
 		case 't':
 			fpInit = thrash_initialize;
+			break;
+		case 'p':
+			chase_pagesize = bytes(optarg);
+			if (check_chase_pagesize(chase_pagesize,
+						 sizeof(char *)) == -1)
+				lmbench_usage(ac, av, usage);
 			break;
 		case 'P':
 			parallel = atoi(optarg);
@@ -68,24 +101,34 @@ main(int ac, char **av)
 	if (optind == ac) {
 		lmbench_usage(ac, av, usage);
 	}
+	if (chase_pagesize && fpInit != thrash_initialize) {
+		fprintf(stderr, "-p requires -t (thrash/page-chase mode)\n");
+		lmbench_usage(ac, av, usage);
+	}
 
-        len = atoi(av[optind]);
+	len = atoi(av[optind]);
 	len *= 1024 * 1024;
 	end = end ? : len;
 
 	if (optind == ac - 1) {
+		if (chase_pagesize &&
+		    check_chase_pagesize(chase_pagesize, STRIDE) == -1)
+			lmbench_usage(ac, av, usage);
 		fprintf(stderr, "\"stride=%d\n", STRIDE);
 		for (range = lower; range <= end; range = step(range)) {
 			loads(len, range, STRIDE, parallel, 
-			      warmup, repetitions);
+			      warmup, repetitions, chase_pagesize);
 		}
 	} else {
 		for (i = optind + 1; i < ac; ++i) {
 			stride = bytes(av[i]);
+			if (chase_pagesize &&
+			    check_chase_pagesize(chase_pagesize, stride) == -1)
+				lmbench_usage(ac, av, usage);
 			fprintf(stderr, "\"stride=%d\n", stride);
 			for (range = lower; range <= end; range = step(range)) {
 				loads(len, range, stride, parallel, 
-				      warmup, repetitions);
+				      warmup, repetitions, chase_pagesize);
 			}
 			fprintf(stderr, "\n");
 		}
@@ -121,7 +164,8 @@ benchmark_loads(iter_t iterations, void *cookie)
 
 void
 loads(size_t len, size_t range, size_t stride, 
-	int parallel, int warmup, int repetitions)
+	int parallel, int warmup, int repetitions,
+	size_t chase_pagesize)
 {
 	double result;
 	size_t count;
@@ -134,6 +178,11 @@ loads(size_t len, size_t range, size_t stride,
 	state.maxlen = len;
 	state.line = stride;
 	state.pagesize = getpagesize();
+	if (fpInit == thrash_initialize && chase_pagesize) {
+		if (check_chase_pagesize(chase_pagesize, state.line) == -1)
+			exit(1);
+		state.pagesize = chase_pagesize;
+	}
 	count = 100 * (state.len / (state.line * 100) + 1);
 
 #if 0
